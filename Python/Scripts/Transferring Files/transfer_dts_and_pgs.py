@@ -114,13 +114,17 @@ def resolve_unit_in_dest(src_unit: Unit | None) -> Unit | None:
     if not unit_name:
         return None
 
-    dst_unit = dst.units.get_or_create(
-        unit=Unit(
-            name=src_unit.name,
-            symbol=getattr(src_unit, "symbol", None),
-            category=getattr(src_unit, "category", None),
-        )
-    )
+    # Only pass category if it has a valid non-None value
+    # The API rejects category=null and requires a value from its allowed list
+    unit_kwargs = {"name": src_unit.name}
+    src_symbol = getattr(src_unit, "symbol", None)
+    src_category = getattr(src_unit, "category", None)
+    if src_symbol:
+        unit_kwargs["symbol"] = src_symbol
+    if src_category:
+        unit_kwargs["category"] = src_category
+
+    dst_unit = dst.units.get_or_create(unit=Unit(**unit_kwargs))
     return dst_unit
 
 
@@ -242,16 +246,16 @@ def transfer_data_templates(ids: list[str]) -> None:
             for dcv in (src_dt.data_column_values or []):
                 try:
                     src_col = src.data_columns.get_by_id(id=dcv.data_column_id)
-                    unit_name = getattr(getattr(src_col, "unit", None), "name", None)
-                    # Typ aus dcv.validation lesen (Option B) statt src_col.type
-                    col_type: str | None = datatype_to_column_type(dcv) or "—"
+                    # Typ aus dcv.validation (zuverlässiger als src_col.type)
+                    col_type: str = datatype_to_column_type(dcv) or "—"
+                    # Unit sitzt auf dcv.unit direkt (die Ergebnis-Unit, z.B. MPa)
+                    unit_name = getattr(getattr(dcv, "unit", None), "name", None)
                     col_info.append(f"{src_col.name} (type={col_type}, unit={unit_name or '—'})")
                 except Exception as e:
                     col_info.append(f"{dcv.name} (⚠️  nicht ladbar: {e})")
 
-            # pv.original_name ist der zuverlässige Name — pv.parameter ist None
-            # wenn der Parameter nur als ParameterValue am DT hängt
-            param_names = []
+            # Parameter: Name + Typ + Unit + Default Value anzeigen
+            param_info = []
             for pv in (src_dt.parameter_values or []):
                 name = (
                     getattr(pv, "original_name", None)
@@ -259,14 +263,24 @@ def transfer_data_templates(ids: list[str]) -> None:
                     or getattr(getattr(pv, "parameter", None), "name", None)
                     or str(pv.id)
                 )
-                param_names.append(name)
+                # Typ aus validation ableiten (DataType.NUMBER -> "#", STRING -> "T")
+                pv_validation = getattr(pv, "validation", None) or []
+                if pv_validation:
+                    pv_dtype = getattr(pv_validation[0], "datatype", None)
+                    pv_dtype_str = pv_dtype.value if hasattr(pv_dtype, "value") else ""
+                    pv_type = {"number": "#", "string": "T", "enum": "☰", "date": "📅"}.get(pv_dtype_str.lower(), "?")
+                else:
+                    pv_type = "?"
+                pv_unit = getattr(getattr(pv, "unit", None), "name", None) or "—"
+                pv_value = getattr(pv, "value", None) or "—"
+                param_info.append(f"{pv_type} {name} (value={pv_value}, unit={pv_unit})")
             print(
                 f"    [DRY RUN] Würde erstellen:\n"
                 f"      Name:        {src_dt.name}\n"
                 f"      Beschreibung:{src_dt.description or '—'}\n"
                 f"      Tags:        {[t.tag for t in (src_dt.tags or [])]}\n"
                 f"      Columns:     {col_info}\n"
-                f"      Parameter:   {param_names}\n"
+                f"      Parameter:   {param_info}\n"
                 f"      Metadata:    {list((src_dt.metadata or {}).keys())}"
             )
             continue
@@ -287,71 +301,157 @@ def transfer_data_templates(ids: list[str]) -> None:
             continue
 
         # Data Columns hinzufügen
-        # add_data_columns erwartet list[DataColumnValue] (nicht list[DataColumn])
+        # Pattern analog zu Parametern: jede Column einzeln hinzufügen
+        # und direkt danach Validation + Unit per update() setzen.
         if src_dt.data_column_values:
-            dst_column_values: list[DataColumnValue] = []
-
+            added_col_count = 0
             for dcv in src_dt.data_column_values:
-                # Source-Column vollständig laden (für type, unit, options)
+                # Source-Column vollständig laden
                 try:
                     src_col = src.data_columns.get_by_id(id=dcv.data_column_id)
                 except Exception as e:
                     print(f"    [WARN] Source-Column '{dcv.name}' konnte nicht geladen werden: {e} — übersprungen")
                     continue
 
+                # Column im Dest-Tenant holen oder anlegen
                 try:
                     dst_col = get_or_create_data_column(src_col=src_col, dcv=dcv)
-                    dst_column_values.append(
-                        DataColumnValue(data_column_id=dst_col.id)
-                    )
                 except Exception as e:
                     print(f"    [WARN] Column '{src_col.name}': {e} — übersprungen")
+                    continue
 
-            if dst_column_values:
+                # Column einzeln zum DT hinzufügen
                 try:
-                    dst.data_templates.add_data_columns(
+                    working_dt_col = dst.data_templates.add_data_columns(
                         data_template_id=created_dt.id,
-                        data_columns=dst_column_values,
+                        data_columns=[DataColumnValue(data_column_id=dst_col.id)],
                     )
-                    print(f"    [OK] {len(dst_column_values)} Column(s) hinzugefügt")
                 except Exception as e:
-                    print(f"    [ERROR] add_data_columns fehlgeschlagen: {e}")
+                    print(f"    [WARN] add_data_columns für '{src_col.name}' fehlgeschlagen: {e}")
+                    continue
+
+                # Target-DataColumnValue auf dem zurückgegebenen DT finden (per Column-ID)
+                target_dcv = next(
+                    (x for x in (working_dt_col.data_column_values or []) if x.data_column_id == dst_col.id),
+                    None
+                )
+                if target_dcv is None:
+                    print(f"    [WARN] target_dcv für '{src_col.name}' nicht gefunden nach add_data_columns")
+                    added_col_count += 1
+                    continue
+
+                # Pass 1: Validation setzen (bestimmt # vs T für die Column)
+                # Validation sitzt auf dcv (dem Source-DataColumnValue), nicht auf src_col
+                src_col_validation = getattr(dcv, "validation", None) or []
+                if src_col_validation:
+                    target_dcv.validation = src_col_validation
+                    try:
+                        working_dt_col = dst.data_templates.update(data_template=working_dt_col)
+                        target_dcv = next(
+                            (x for x in (working_dt_col.data_column_values or []) if x.data_column_id == dst_col.id),
+                            target_dcv
+                        )
+                    except Exception as e:
+                        print(f"    [WARN] Column-Validation-Update für '{src_col.name}' fehlgeschlagen: {e}")
+
+                # Pass 2: Unit setzen (sitzt ebenfalls auf dcv, nicht auf src_col)
+                src_dcv_unit = getattr(dcv, "unit", None)
+                if src_dcv_unit:
+                    try:
+                        dst_unit = resolve_unit_in_dest(src_dcv_unit)
+                        if dst_unit:
+                            target_dcv.unit = dst_unit
+                            dst.data_templates.update(data_template=working_dt_col)
+                    except Exception as e:
+                        print(f"    [WARN] Column-Unit für '{src_col.name}' fehlgeschlagen: {e}")
+
+                added_col_count += 1
+
+            print(f"    [OK] {added_col_count} Column(s) hinzugefügt")
+
 
         # Parameter hinzufügen via get_or_create
-        # Auf DataTemplate heißt das Attribut parameter_values (nicht parameters)
-        # add_parameters erwartet list[ParameterValue], nicht list[Parameter]
+        # Pattern aus _00080_build_DTs.py: jeden Parameter einzeln hinzufügen
+        # und direkt danach Validation + Value + Unit per update() setzen.
+        # Batch-Add + Batch-Update funktioniert nicht zuverlässig (API-Bug).
         if src_dt.parameter_values:
-            dst_param_values = []
+            added_count = 0
             for pv in src_dt.parameter_values:
+                param_name = (
+                    getattr(pv, "original_name", None)
+                    or getattr(pv, "name", None)
+                    or getattr(getattr(pv, "parameter", None), "name", None)
+                )
+                if not param_name:
+                    print(f"    [WARN] ParameterValue ohne Namen übersprungen: id={pv.id}")
+                    continue
+
                 try:
-                    # pv.parameter ist None wenn der Parameter nur als ParameterValue
-                    # am DT hängt — der Name steckt in pv.original_name (zuverlässig)
-                    # oder als Fallback in pv.name (Pydantic-Feld, manchmal None)
-                    param_name = (
-                        getattr(pv, "original_name", None)
-                        or getattr(pv, "name", None)
-                        or getattr(getattr(pv, "parameter", None), "name", None)
-                    )
-                    if not param_name:
-                        print(f"    [WARN] ParameterValue ohne Namen übersprungen: id={pv.id}")
-                        continue
                     dst_param = dst.parameters.get_or_create(
                         parameter=Parameter(name=param_name)
                     )
-                    dst_param_values.append(ParameterValue(parameter=dst_param))
                 except Exception as e:
-                    param_name_safe = getattr(pv, "original_name", None) or str(pv.id)
-                    print(f"    [WARN] Parameter '{param_name_safe}' fehlgeschlagen: {e}")
+                    print(f"    [WARN] Parameter '{param_name}' get_or_create fehlgeschlagen: {e}")
+                    continue
 
-            if dst_param_values:
+                # Parameter einzeln zum DT hinzufügen — gibt aktualisiertes DT zurück
                 try:
-                    dst.data_templates.add_parameters(
+                    working_dt = dst.data_templates.add_parameters(
                         data_template_id=created_dt.id,
-                        parameters=dst_param_values,
+                        parameters=[ParameterValue(parameter=dst_param)],
                     )
-                    print(f"    [OK] {len(dst_param_values)} Parameter hinzugefügt")
                 except Exception as e:
-                    print(f"    [ERROR] add_parameters fehlgeschlagen: {e}")
+                    print(f"    [WARN] add_parameters für '{param_name}' fehlgeschlagen: {e}")
+                    continue
+
+                # Target-ParameterValue auf dem zurückgegebenen DT finden (per Parameter-ID)
+                target_pv = next(
+                    (x for x in (working_dt.parameter_values or []) if x.id == dst_param.id),
+                    None
+                )
+                if target_pv is None:
+                    print(f"    [WARN] target_pv für '{param_name}' nicht gefunden nach add_parameters")
+                    added_count += 1
+                    continue
+
+                # Pass 1: Validation setzen (bestimmt # vs T vs Dropdown)
+                src_validation = getattr(pv, "validation", None) or []
+                if src_validation:
+                    target_pv.validation = src_validation
+                    try:
+                        working_dt = dst.data_templates.update(data_template=working_dt)
+                        # target_pv neu holen nach update
+                        target_pv = next(
+                            (x for x in (working_dt.parameter_values or []) if x.id == dst_param.id),
+                            target_pv
+                        )
+                    except Exception as e:
+                        print(f"    [WARN] Validation-Update für '{param_name}' fehlgeschlagen: {e}")
+
+                # Pass 2: Value + Unit separat
+                src_value = getattr(pv, "value", None)
+                src_unit = getattr(pv, "unit", None)
+                needs_value_unit = src_value is not None or src_unit is not None
+
+                if needs_value_unit:
+                    if src_value is not None:
+                        target_pv.value = src_value
+                    if src_unit:
+                        try:
+                            dst_unit = resolve_unit_in_dest(src_unit)
+                            if dst_unit:
+                                target_pv.unit = dst_unit
+                        except Exception as e:
+                            print(f"    [WARN] Unit für '{param_name}' fehlgeschlagen: {e}")
+                    try:
+                        dst.data_templates.update(data_template=working_dt)
+                    except Exception as e:
+                        print(f"    [WARN] Value/Unit-Update für '{param_name}' fehlgeschlagen: {e}")
+
+                added_count += 1
+
+            print(f"    [OK] {added_count} Parameter hinzugefügt")
+
 
 
 # ── Parameter Groups transferieren ─────────────────────────────────────────────
