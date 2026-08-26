@@ -23,7 +23,7 @@ import tomllib
 import pathlib
 
 from albert import Albert
-from albert.resources.data_columns import DataColumn, DataColumnType
+from albert.resources.data_columns import DataColumn
 from albert.resources.data_templates import DataTemplate, DataColumnValue
 from albert.resources.parameter_groups import DataType, ParameterGroup, ParameterValue
 from albert.resources.parameters import Parameter
@@ -35,7 +35,7 @@ from albert.resources.units import Unit
 CREDENTIALS_FILE = pathlib.Path("/Users/christian/credentials.toml")
 
 # Muss exakt dem Sektionsnamen in der TOML entsprechen, z.B. "Albert Sandbox"
-SOURCE_TENANT = "Albert Prod Commercial"
+SOURCE_TENANT = "Albert Production"
 DEST_TENANT   = "Albert Sandbox"
 
 # Sicherheitsmodus: True = nur Vorschau, False = schreibt tatsächlich
@@ -43,7 +43,6 @@ DRY_RUN = True
 
 # IDs der zu transferierenden Records (leere Liste = Typ wird übersprungen)
 DT_IDS: list[str] = [
-    "DAT1011"
     # "DAT1",
     # "DAT7",
 ]
@@ -125,33 +124,40 @@ def resolve_unit_in_dest(src_unit: Unit | None) -> Unit | None:
     return dst_unit
 
 
-def datatype_to_column_type(dcv: DataColumnValue) -> DataColumnType | None:
+def datatype_to_column_type(dcv: DataColumnValue) -> str | None:
     """
     Liest den DataType aus der validation-Liste eines DataColumnValue
-    und mappt ihn auf den entsprechenden DataColumnType-Enum.
+    und mappt ihn auf den Albert Column-Typ-String.
 
     DataColumnValue.validation ist die zuverlässigste Quelle für den Typ,
     da DataColumn.type von der API nicht immer zurückgeliefert wird.
 
     Mapping:
-      DataType.NUMBER  -> DataColumnType.NUMERIC
-      DataType.STRING  -> DataColumnType.TEXT
-      DataType.ENUM    -> DataColumnType.LIST
-      DataType.DATE    -> DataColumnType.DATE
+      DataType.NUMBER  -> "Numeric"
+      DataType.STRING  -> "Text"
+      DataType.ENUM    -> "List"
+      DataType.DATE    -> "Date"
       alles andere     -> None (Albert setzt Default)
+
+    Hinweis: DataColumnType-Enum ist in manchen SDK-Versionen nicht
+    exportiert — daher direkte String-Werte.
     """
     validation = getattr(dcv, "validation", None) or []
     if not validation:
         return None
 
     datatype = getattr(validation[0], "datatype", None)
+    if datatype is None:
+        return None
+
+    datatype_str = datatype.value if hasattr(datatype, "value") else str(datatype)
     mapping = {
-        DataType.NUMBER: DataColumnType.NUMERIC,
-        DataType.STRING: DataColumnType.TEXT,
-        DataType.ENUM:   DataColumnType.LIST,
-        DataType.DATE:   DataColumnType.DATE,
+        "number": "Numeric",
+        "string": "Text",
+        "enum":   "List",
+        "date":   "Date",
     }
-    return mapping.get(datatype, None)
+    return mapping.get(datatype_str.lower(), None)
 
 
 def get_or_create_data_column(src_col: DataColumn, dcv: DataColumnValue) -> DataColumn:
@@ -173,7 +179,7 @@ def get_or_create_data_column(src_col: DataColumn, dcv: DataColumnValue) -> Data
         return existing
 
     # Typ aus dcv.validation ableiten (zuverlaessiger als src_col.type)
-    col_type = datatype_to_column_type(dcv)
+    col_type: str | None = datatype_to_column_type(dcv)
     if col_type:
         print(f"      [TYPE] Column-Typ aus validation abgeleitet: {col_type}")
     else:
@@ -238,7 +244,7 @@ def transfer_data_templates(ids: list[str]) -> None:
                     src_col = src.data_columns.get_by_id(id=dcv.data_column_id)
                     unit_name = getattr(getattr(src_col, "unit", None), "name", None)
                     # Typ aus dcv.validation lesen (Option B) statt src_col.type
-                    col_type = datatype_to_column_type(dcv) or "—"
+                    col_type: str | None = datatype_to_column_type(dcv) or "—"
                     col_info.append(f"{src_col.name} (type={col_type}, unit={unit_name or '—'})")
                 except Exception as e:
                     col_info.append(f"{dcv.name} (⚠️  nicht ladbar: {e})")
