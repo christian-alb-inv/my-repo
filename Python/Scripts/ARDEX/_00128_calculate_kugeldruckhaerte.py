@@ -229,22 +229,25 @@ for task_id in TASK_IDS:
         print(f"  Nothing to calculate — no unfilled rows found.")
         continue
 
-    # --- Step 7: Calculate H and build write payload ---
-    # One TaskPropertyCreate per trial row — targets Kugeldruckhärte column only.
-    # trial_number ensures we patch the exact row where Eindringtiefe lives.
+    # --- Step 7: Calculate H and write one call per interval combination ---
+    # The API requires all entries in one update_or_create call to share the
+    # same intervalCombination — so we loop per interval and fire separately.
+    # trial_number ensures we patch the exact row — Eindringtiefe is untouched.
     for lot_id, intervals in rows_to_calculate.items():
-        payload = []
+        any_written = False
 
         for interval_key, trial_map in intervals.items():
             F = pruefkraft_map.get(interval_key) or pruefkraft_map.get("default")
             if F is None:
                 print(f"  WARNING: No Prüfkraft for interval '{interval_key}', skipping.")
                 continue
+
+            interval_payload = []
             for trial_no, h in trial_map.items():
                 H = calc_H(F, h)
                 print(f"  Lot={lot_id} | {interval_key} | Trial #{trial_no} | h={h} mm | F={F} kp -> H={H}")
 
-                payload.append(TaskPropertyCreate(
+                interval_payload.append(TaskPropertyCreate(
                     interval_combination=interval_key,
                     data_column=TaskDataColumn(
                         data_column_id=kugeldruckhaerte_dc_id,
@@ -252,25 +255,26 @@ for task_id in TASK_IDS:
                     ),
                     value=str(H),
                     data_template=dt,
-                    trial_number=trial_no,  # targets the exact row — Eindringtiefe untouched
+                    trial_number=trial_no,
                 ))
 
-        if not payload:
-            continue
+            if not interval_payload:
+                continue
 
-        if DRY_RUN:
-            print(f"\n  [DRY RUN] Would write {len(payload)} Kugeldruckhärte value(s) for lot {lot_id} — no changes made.")
-            continue
+            if DRY_RUN:
+                print(f"  [DRY RUN] Would write {len(interval_payload)} value(s) for interval '{interval_key}', lot {lot_id} — no changes made.")
+                continue
 
-        print(f"  Writing {len(payload)} value(s) for lot {lot_id}...")
-        client.property_data.update_or_create_task_properties(
-            task_id=task_id,
-            block_id=block_id,
-            inventory_id=inventory_id,
-            lot_id=lot_id,
-            properties=payload,
-            return_scope="none",
-        )
+            print(f"  Writing {len(interval_payload)} value(s) for interval '{interval_key}', lot {lot_id}...")
+            client.property_data.update_or_create_task_properties(
+                task_id=task_id,
+                block_id=block_id,
+                inventory_id=inventory_id,
+                lot_id=lot_id,
+                properties=interval_payload,
+                return_scope="none",
+            )
+            any_written = True
 
     print(f"  Done: {task_id}")
 
