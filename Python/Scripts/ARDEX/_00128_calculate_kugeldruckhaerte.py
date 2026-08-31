@@ -166,8 +166,8 @@ for task_id in TASK_IDS:
     for dcv in (dt.data_column_values or []):
         dc = client.data_columns.get_by_id(id=dcv.data_column_id)
         if dc.name == COL_KUGELDRUCKHAERTE:
-            kugeldruckhaerte_dc_id  = dcv.data_column_id
-            kugeldruckhaerte_col_seq = dcv.column_sequence
+            kugeldruckhaerte_dc_id   = dcv.data_column_id
+            kugeldruckhaerte_col_seq = dcv.sequence  # SDK uses 'sequence', not 'column_sequence'
             break
 
     if not kugeldruckhaerte_dc_id:
@@ -187,9 +187,11 @@ for task_id in TASK_IDS:
     )
 
     # Collect rows where Eindringtiefe is filled AND Kugeldruckhärte is empty.
-    # Structure: lot_id -> interval_key -> [(trial_number, h_val)]
-    rows_to_calculate: dict = defaultdict(lambda: defaultdict(list))
-    skipped = 0
+    # Structure: lot_id -> interval_key -> {trial_number: h_val}
+    # Using a dict keyed by trial_number deduplicates rows the API returns
+    # multiple times (once per inventory entry on the task).
+    rows_to_calculate: dict = defaultdict(lambda: defaultdict(dict))
+    seen_skipped: set = set()  # track (lot_id, interval_key, trial_no) to avoid double-counting
 
     for entry in all_data:
         lot_id = entry.inventory.lot_id
@@ -212,14 +214,14 @@ for task_id in TASK_IDS:
                         if col.property_data and col.property_data.value:
                             H_already_filled = True
 
+                dedup_key = (lot_id, interval_key, trial.trial_number)
                 if H_already_filled:
-                    skipped += 1
+                    seen_skipped.add(dedup_key)
                 elif h_val is not None:
-                    # Store trial_number so we can write back into the exact same row
-                    rows_to_calculate[lot_id][interval_key].append(
-                        (trial.trial_number, h_val)
-                    )
+                    # Dict assignment deduplicates: same row seen multiple times is stored once
+                    rows_to_calculate[lot_id][interval_key][trial.trial_number] = h_val
 
+    skipped = len(seen_skipped)
     if skipped:
         print(f"  Skipped {skipped} trial(s) — Kugeldruckhärte already populated.")
 
@@ -233,12 +235,12 @@ for task_id in TASK_IDS:
     for lot_id, intervals in rows_to_calculate.items():
         payload = []
 
-        for interval_key, trials in intervals.items():
+        for interval_key, trial_map in intervals.items():
             F = pruefkraft_map.get(interval_key) or pruefkraft_map.get("default")
             if F is None:
                 print(f"  WARNING: No Prüfkraft for interval '{interval_key}', skipping.")
                 continue
-            for (trial_no, h) in trials:
+            for trial_no, h in trial_map.items():
                 H = calc_H(F, h)
                 print(f"  Lot={lot_id} | {interval_key} | Trial #{trial_no} | h={h} mm | F={F} kp -> H={H}")
 
