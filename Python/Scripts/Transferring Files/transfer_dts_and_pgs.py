@@ -35,15 +35,14 @@ from albert.resources.units import Unit
 CREDENTIALS_FILE = pathlib.Path("/Users/christian/credentials.toml")
 
 # Muss exakt dem Sektionsnamen in der TOML entsprechen, z.B. "Albert Sandbox"
-SOURCE_TENANT = "Albert Prod Commercial"
+SOURCE_TENANT = "Albert Production"
 DEST_TENANT   = "Albert Sandbox"
 
 # Sicherheitsmodus: True = nur Vorschau, False = schreibt tatsächlich
-DRY_RUN = False
+DRY_RUN = True
 
 # IDs der zu transferierenden Records (leere Liste = Typ wird übersprungen)
 DT_IDS: list[str] = [
-    "DAT1011"
     # "DAT1",
     # "DAT7",
 ]
@@ -245,6 +244,9 @@ def transfer_data_templates(ids: list[str]) -> None:
         if DRY_RUN:
             col_info = []
             for dcv in (src_dt.data_column_values or []):
+                if getattr(dcv, "hidden", False):
+                    col_info.append(f"{dcv.name} (hidden — wird übersprungen)")
+                    continue
                 try:
                     src_col = src.data_columns.get_by_id(id=dcv.data_column_id)
                     # Typ aus dcv.validation (zuverlässiger als src_col.type)
@@ -307,6 +309,11 @@ def transfer_data_templates(ids: list[str]) -> None:
         if src_dt.data_column_values:
             added_col_count = 0
             for dcv in src_dt.data_column_values:
+                # Hidden Columns überspringen (z.B. interne Berechnungs-Columns)
+                if getattr(dcv, 'hidden', False):
+                    print(f"    [SKIP] Column '{dcv.name}' ist hidden — wird nicht übertragen")
+                    continue
+
                 # Source-Column vollständig laden
                 try:
                     src_col = src.data_columns.get_by_id(id=dcv.data_column_id)
