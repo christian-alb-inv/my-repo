@@ -2,12 +2,14 @@
 # Calculate & Write Kugeldruckhärte
 # Reads Eindringtiefe values from confirmed property tasks using DAT828,
 # calculates H = F / (pi * (h - 0.03)) using the Prüfkraft from the linked
-# workflow, and writes Kugeldruckhärte only into the specific trial row where
-# Eindringtiefe was read. Rows already containing a Kugeldruckhärte value
-# are skipped. Eindringtiefe is never touched.
+# workflow, then writes both columns back via bulk_load_task_properties.
 #
-# Write strategy: update_or_create_task_properties with explicit trial_number
-# so only the Kugeldruckhärte column is patched — no delete/rewrite needed.
+# SAFETY: bulk_load deletes and rewrites the entire interval combination.
+# To prevent data loss, ALL trials of an interval are always read and
+# rewritten together — including trials where Kugeldruckhärte is already set.
+# Skip logic operates at interval level:
+#   - Skip interval entirely if ALL trials already have Kugeldruckhärte
+#   - Process interval if ANY trial is missing Kugeldruckhärte
 #
 # Prüfkraft lookup:
 #   Compound workflow: parsed from interval_combinations.interval_string
@@ -21,7 +23,7 @@ from collections import defaultdict
 from datetime import date
 
 from albert import Albert
-from albert.resources.property_data import TaskPropertyCreate, TaskDataColumn
+from albert.resources.property_data import BulkPropertyData, BulkPropertyDataColumn
 
 # =============================================================================
 # KONFIGURATION
@@ -95,12 +97,6 @@ def parse_pruefkraft_from_string(text: str) -> float | None:
 
 # =============================================================================
 # HELPER — Build Prüfkraft map from a fully hydrated workflow object
-#
-# Compound workflow (wfl.interval_combinations populated):
-#   Returns {interval_id: F}  e.g. {"ROW3XROW8": 50.0, ...}
-#
-# Simple workflow (no interval_combinations):
-#   Returns {"default": F}
 # =============================================================================
 
 def get_pruefkraft_map(wfl) -> dict:
@@ -158,40 +154,31 @@ for task_id in TASK_IDS:
         continue
     print(f"  Prüfkraft map: {pruefkraft_map}")
 
-    # --- Step 4: Fetch data template to get Kugeldruckhärte column ID + sequence ---
-    # These are needed for TaskPropertyCreate to target the correct column.
-    dt = client.data_templates.get_by_id(id=DATA_TEMPLATE_ID)
-    kugeldruckhaerte_dc_id = None
-    kugeldruckhaerte_col_seq = None
-    for dcv in (dt.data_column_values or []):
-        dc = client.data_columns.get_by_id(id=dcv.data_column_id)
-        if dc.name == COL_KUGELDRUCKHAERTE:
-            kugeldruckhaerte_dc_id   = dcv.data_column_id
-            kugeldruckhaerte_col_seq = dcv.sequence  # SDK uses 'sequence', not 'column_sequence'
-            break
-
-    if not kugeldruckhaerte_dc_id:
-        print(f"  ERROR: Could not find '{COL_KUGELDRUCKHAERTE}' column in {DATA_TEMPLATE_ID}, skipping.")
-        continue
-
-    # --- Step 5: Resolve inventory_id (shared across all lots) ---
+    # --- Step 4: Resolve inventory_id (shared across all lots) ---
     inventory_entries = task.inventory_information or []
     if not inventory_entries:
         print(f"  No inventory linked to {task_id}, skipping.")
         continue
     inventory_id = inventory_entries[0].inventory_id
 
-    # --- Step 6: Read all existing trial data ---
+    # --- Step 5: Read ALL trial data per interval ---
+    # We must read every trial in every interval — not just unfilled ones —
+    # because bulk_load rewrites the entire interval. Dropping any trial
+    # would permanently delete its data.
+    #
+    # Structure: lot_id -> interval_key -> {trial_number: (h_val, H_val)}
+    #   h_val: Eindringtiefe (always present if row has data)
+    #   H_val: existing Kugeldruckhärte value, or None if not yet calculated
+    #
+    # We deduplicate by (lot_id, interval_key, trial_number) since the API
+    # returns the same row multiple times for tasks with multiple inventories.
+
     all_data = client.property_data.get_all_task_properties(
         task_id=task_id, with_data_only=True
     )
 
-    # Collect rows where Eindringtiefe is filled AND Kugeldruckhärte is empty.
-    # Structure: lot_id -> interval_key -> {trial_number: h_val}
-    # Using a dict keyed by trial_number deduplicates rows the API returns
-    # multiple times (once per inventory entry on the task).
-    rows_to_calculate: dict = defaultdict(lambda: defaultdict(dict))
-    seen_skipped: set = set()  # track (lot_id, interval_key, trial_no) to avoid double-counting
+    # lot_id -> interval_key -> {trial_no: (h_val, H_val)}
+    interval_data_map: dict = defaultdict(lambda: defaultdict(dict))
 
     for entry in all_data:
         lot_id = entry.inventory.lot_id
@@ -203,7 +190,7 @@ for task_id in TASK_IDS:
                 if trial.void:
                     continue
                 h_val = None
-                H_already_filled = False
+                H_val = None
                 for col in (trial.data_columns or []):
                     if col.hidden:
                         continue
@@ -212,69 +199,81 @@ for task_id in TASK_IDS:
                             h_val = float(col.property_data.value)
                     if col.name == COL_KUGELDRUCKHAERTE:
                         if col.property_data and col.property_data.value:
-                            H_already_filled = True
+                            H_val = float(col.property_data.value)
 
-                dedup_key = (lot_id, interval_key, trial.trial_number)
-                if H_already_filled:
-                    seen_skipped.add(dedup_key)
-                elif h_val is not None:
-                    # Dict assignment deduplicates: same row seen multiple times is stored once
-                    rows_to_calculate[lot_id][interval_key][trial.trial_number] = h_val
+                # Only store rows that have at least Eindringtiefe
+                if h_val is not None:
+                    dedup_key = trial.trial_number
+                    # Dict assignment deduplicates repeated rows
+                    interval_data_map[lot_id][interval_key][dedup_key] = (h_val, H_val)
 
-    skipped = len(seen_skipped)
-    if skipped:
-        print(f"  Skipped {skipped} trial(s) — Kugeldruckhärte already populated.")
+    # --- Step 6: Determine which intervals need processing ---
+    # An interval needs processing if ANY trial is missing Kugeldruckhärte.
+    # If ALL trials already have Kugeldruckhärte, skip the entire interval.
 
-    if not rows_to_calculate:
-        print(f"  Nothing to calculate — no unfilled rows found.")
+    intervals_to_process: dict = defaultdict(dict)  # lot_id -> interval_key -> trial_map
+
+    for lot_id, intervals in interval_data_map.items():
+        for interval_key, trial_map in intervals.items():
+            all_filled = all(H_val is not None for (_, H_val) in trial_map.values())
+            if all_filled:
+                print(f"  Skipping interval '{interval_key}', lot {lot_id} — all {len(trial_map)} trial(s) already complete.")
+            else:
+                missing = sum(1 for (_, H_val) in trial_map.values() if H_val is None)
+                print(f"  Interval '{interval_key}', lot {lot_id}: {missing} of {len(trial_map)} trial(s) need calculation.")
+                intervals_to_process[lot_id][interval_key] = trial_map
+
+    if not intervals_to_process:
+        print(f"  Nothing to do — all intervals complete.")
         continue
 
-    # --- Step 7: Calculate H and write one call per interval combination ---
-    # The API requires all entries in one update_or_create call to share the
-    # same intervalCombination — so we loop per interval and fire separately.
-    # trial_number ensures we patch the exact row — Eindringtiefe is untouched.
-    for lot_id, intervals in rows_to_calculate.items():
-        any_written = False
-
+    # --- Step 7: Calculate and write ---
+    # For each interval to process, calculate H for trials missing it,
+    # keep existing H for trials that already have it, then bulk_load all
+    # trials together to avoid deleting any existing data.
+    for lot_id, intervals in intervals_to_process.items():
         for interval_key, trial_map in intervals.items():
             F = pruefkraft_map.get(interval_key) or pruefkraft_map.get("default")
             if F is None:
                 print(f"  WARNING: No Prüfkraft for interval '{interval_key}', skipping.")
                 continue
 
-            interval_payload = []
-            for trial_no, h in trial_map.items():
-                H = calc_H(F, h)
-                print(f"  Lot={lot_id} | {interval_key} | Trial #{trial_no} | h={h} mm | F={F} kp -> H={H}")
+            eindringtiefe_series = []
+            kugeldruckhaerte_series = []
 
-                interval_payload.append(TaskPropertyCreate(
-                    interval_combination=interval_key,
-                    data_column=TaskDataColumn(
-                        data_column_id=kugeldruckhaerte_dc_id,
-                        column_sequence=kugeldruckhaerte_col_seq,
-                    ),
-                    value=str(H),
-                    data_template=dt,
-                    trial_number=trial_no,
-                ))
-
-            if not interval_payload:
-                continue
+            for trial_no, (h, H_existing) in sorted(trial_map.items()):
+                H = H_existing if H_existing is not None else calc_H(F, h)
+                status = "existing" if H_existing is not None else "calculated"
+                eindringtiefe_series.append(str(h))
+                kugeldruckhaerte_series.append(str(H))
+                print(f"  Lot={lot_id} | {interval_key} | Trial #{trial_no} | h={h} | H={H} ({status})")
 
             if DRY_RUN:
-                print(f"  [DRY RUN] Would write {len(interval_payload)} value(s) for interval '{interval_key}', lot {lot_id} — no changes made.")
+                print(f"  [DRY RUN] Would write {len(eindringtiefe_series)} row(s) for interval '{interval_key}', lot {lot_id} — no changes made.")
                 continue
 
-            print(f"  Writing {len(interval_payload)} value(s) for interval '{interval_key}', lot {lot_id}...")
-            client.property_data.update_or_create_task_properties(
+            bulk = BulkPropertyData(columns=[
+                BulkPropertyDataColumn(
+                    data_column_name=COL_EINDRINGTIEFE,
+                    data_series=eindringtiefe_series,
+                ),
+                BulkPropertyDataColumn(
+                    data_column_name=COL_KUGELDRUCKHAERTE,
+                    data_series=kugeldruckhaerte_series,
+                ),
+            ])
+
+            print(f"  Writing {len(eindringtiefe_series)} row(s) for interval '{interval_key}', lot {lot_id}...")
+            client.property_data.bulk_load_task_properties(
                 task_id=task_id,
                 block_id=block_id,
                 inventory_id=inventory_id,
+                property_data=bulk,
+                interval=interval_key,
                 lot_id=lot_id,
-                properties=interval_payload,
                 return_scope="none",
             )
-            any_written = True
+            print(f"  ✓ Done: interval '{interval_key}', lot {lot_id}")
 
     print(f"  Done: {task_id}")
 
