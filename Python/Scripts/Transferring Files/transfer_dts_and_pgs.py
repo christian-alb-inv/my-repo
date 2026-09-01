@@ -35,15 +35,15 @@ from albert.resources.units import Unit
 CREDENTIALS_FILE = pathlib.Path("/Users/christian/credentials.toml")
 
 # Muss exakt dem Sektionsnamen in der TOML entsprechen, z.B. "Albert Sandbox"
-SOURCE_TENANT = "Albert Production"
-DEST_TENANT   = "Albert Sandbox"
+SOURCE_TENANT = "Albert Sandbox"
+DEST_TENANT   = "ARDEX EU Sandbox"
 
 # Sicherheitsmodus: True = nur Vorschau, False = schreibt tatsächlich
-DRY_RUN = True
+DRY_RUN = False
 
 # IDs der zu transferierenden Records (leere Liste = Typ wird übersprungen)
 DT_IDS: list[str] = [
-    # "DAT1",
+    "DAT828",
     # "DAT7",
 ]
 PG_IDS: list[str] = [
