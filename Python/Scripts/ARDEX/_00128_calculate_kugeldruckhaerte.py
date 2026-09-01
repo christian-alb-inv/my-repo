@@ -33,7 +33,7 @@ from albert.resources.property_data import BulkPropertyData, BulkPropertyDataCol
 CREDENTIALS_FILE = pathlib.Path("/Users/christian/credentials.toml")
 
 # Muss exakt dem Sektionsnamen in der TOML entsprechen
-TENANT = "Albert Sandbox"
+TENANT = "ARDEX EU Sandbox"
 
 # Sicherheitsmodus: True = nur Vorschau, False = schreibt tatsächlich
 DRY_RUN = True
@@ -43,12 +43,11 @@ DRY_RUN = True
 # =============================================================================
 
 TASK_IDS = [
-    "TASPT2210",  # Kugeldruckhärte mit Automation (no intervals)
-    "TASPT2209",  # Kugeldruckhärte 2 Batches + Intervals + 2 Prüfkräfte (mit Automation)
+    "TASPT2",  
 ]
 
-PRUEFKRAFT_PRM   = "PRM1167"  # Parameter ID for Prüfkraft in the linked workflow
-DATA_TEMPLATE_ID = "DAT828"   # Kugeldruckhärte data template
+PRUEFKRAFT_PRM   = "PRM7"  # Parameter ID for Prüfkraft in the linked workflow
+DATA_TEMPLATE_ID = "DAT2"   # Kugeldruckhärte data template
 
 # Column names — must match exactly as stored in the data template
 COL_EINDRINGTIEFE    = "Eindringtiefe"
@@ -101,13 +100,24 @@ def parse_pruefkraft_from_string(text: str) -> float | None:
 
 def get_pruefkraft_map(wfl) -> dict:
     pruefkraft_map = {}
-
+ 
     if wfl.interval_combinations:
-        # Compound: parse F from each combination's interval_string
+        # Compound: try to parse F from each combination's interval_string
+        # e.g. "Prüfkraft: 50 kp,Zeit: 1 day" -> per-interval F
         for combo in wfl.interval_combinations:
             F = parse_pruefkraft_from_string(combo.interval_string)
             if F is not None:
                 pruefkraft_map[combo.interval_id] = F
+ 
+        # If no Prüfkraft found in interval strings (e.g. workflow uses Zeit/Time
+        # intervals only and Prüfkraft is a single setpoint), fall back to reading
+        # the parameter setpoints — applies as a single "default" F for all intervals.
+        if not pruefkraft_map:
+            for pg_sp in (wfl.parameter_group_setpoints or []):
+                for p_setpoint in (pg_sp.parameter_setpoints or []):
+                    if p_setpoint.parameter_id == PRUEFKRAFT_PRM:
+                        if p_setpoint.value is not None:
+                            pruefkraft_map["default"] = float(p_setpoint.value)
     else:
         # Simple: read F directly from the Prüfkraft parameter setpoint
         for pg_sp in (wfl.parameter_group_setpoints or []):
@@ -115,7 +125,7 @@ def get_pruefkraft_map(wfl) -> dict:
                 if p_setpoint.parameter_id == PRUEFKRAFT_PRM:
                     if p_setpoint.value is not None:
                         pruefkraft_map["default"] = float(p_setpoint.value)
-
+ 
     return pruefkraft_map
 
 
