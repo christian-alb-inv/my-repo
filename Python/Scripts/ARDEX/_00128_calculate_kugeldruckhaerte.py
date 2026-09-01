@@ -73,8 +73,8 @@ today = date.today().isoformat()
 # =============================================================================
 
 def calc_H(F: float, h: float) -> float:
-    """H = F / (pi * (h - 0.03)), rounded to 4 decimal places."""
-    return round(F / (math.pi * (h - 0.03)), 4)
+    """H = F / (pi * (h - 0.03)), rounded to 2 decimal places."""
+    return round(F / (math.pi * (h - 0.03)), 2)
 
 
 # =============================================================================
