@@ -36,14 +36,14 @@ CREDENTIALS_FILE = pathlib.Path("/Users/christian/credentials.toml")
 TENANT = "ARDEX EU Sandbox"
 
 # Sicherheitsmodus: True = nur Vorschau, False = schreibt tatsächlich
-DRY_RUN = True
+DRY_RUN = False
 
 # =============================================================================
 # CONSTANTS — adjust Task IDs as needed
 # =============================================================================
 
 TASK_IDS = [
-    "TASPT2",  
+    "TASPT3",  
 ]
 
 PRUEFKRAFT_PRM   = "PRM7"  # Parameter ID for Prüfkraft in the linked workflow
