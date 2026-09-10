@@ -35,15 +35,15 @@ from albert.resources.units import Unit
 CREDENTIALS_FILE = pathlib.Path("/Users/christian/credentials.toml")
 
 # Muss exakt dem Sektionsnamen in der TOML entsprechen, z.B. "Albert Sandbox"
-SOURCE_TENANT = "Albert Sandbox"
-DEST_TENANT   = "ARDEX EU Sandbox"
+SOURCE_TENANT = "Albert Production"
+DEST_TENANT   = "Albert Sandbox"
 
 # Sicherheitsmodus: True = nur Vorschau, False = schreibt tatsächlich
-DRY_RUN = False
+DRY_RUN = True
 
 # IDs der zu transferierenden Records (leere Liste = Typ wird übersprungen)
 DT_IDS: list[str] = [
-    "DAT828",
+    # "DAT1",
     # "DAT7",
 ]
 PG_IDS: list[str] = [
@@ -281,7 +281,7 @@ def transfer_data_templates(ids: list[str]) -> None:
                 f"    [DRY RUN] Würde erstellen:\n"
                 f"      Name:        {src_dt.name}\n"
                 f"      Beschreibung:{src_dt.description or '—'}\n"
-                f"      Tags:        {[t.tag for t in (src_dt.tags or [])]}\n"
+                f"      Tags:        (werden nicht migriert)\n"
                 f"      Columns:     {col_info}\n"
                 f"      Parameter:   {param_info}\n"
                 f"      Metadata:    {list((src_dt.metadata or {}).keys())}"
@@ -292,7 +292,7 @@ def transfer_data_templates(ids: list[str]) -> None:
         new_dt = DataTemplate(
             name=src_dt.name,
             description=src_dt.description,
-            tags=src_dt.tags or [],
+            tags=[],  # Tags werden bewusst nicht migriert
             metadata=copy_metadata(src_dt.metadata),
         )
 
@@ -509,7 +509,7 @@ def transfer_parameter_groups(ids: list[str]) -> None:
         new_pg = ParameterGroup(
             name=src_pg.name,
             description=getattr(src_pg, "description", None),
-            tags=getattr(src_pg, "tags", []) or [],
+            tags=[],  # Tags werden bewusst nicht migriert
             metadata=copy_metadata(src_pg.metadata),
             parameters=dst_params,
         )
