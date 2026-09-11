@@ -497,13 +497,21 @@ def transfer_parameter_groups(ids: list[str]) -> None:
             continue
 
         # Parameter im Dest-Tenant via get_or_create sicherstellen
-        dst_params = []
+        # Nur name übergeben — id/category etc. werden von der API abgelehnt
+        # ParameterGroup.parameters erwartet list[ParameterValue], nicht list[Parameter]
+        dst_param_values = []
         for p in (src_pg.parameters or []):
+            param_name = getattr(p, "name", None) or getattr(p, "original_name", None)
+            if not param_name:
+                print(f"    [WARN] Parameter ohne Namen übersprungen")
+                continue
             try:
-                dst_param = dst.parameters.get_or_create(parameter=p)
-                dst_params.append(dst_param)
+                dst_param = dst.parameters.get_or_create(
+                    parameter=Parameter(name=param_name)
+                )
+                dst_param_values.append(ParameterValue(parameter=dst_param))
             except Exception as e:
-                print(f"    [WARN] Parameter '{p.name}' fehlgeschlagen: {e}")
+                print(f"    [WARN] Parameter '{param_name}' fehlgeschlagen: {e}")
 
         # Neue PG anlegen
         new_pg = ParameterGroup(
@@ -511,7 +519,7 @@ def transfer_parameter_groups(ids: list[str]) -> None:
             description=getattr(src_pg, "description", None),
             tags=[],  # Tags werden bewusst nicht migriert
             metadata=copy_metadata(src_pg.metadata),
-            parameters=dst_params,
+            parameters=dst_param_values,
         )
 
         try:
