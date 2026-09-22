@@ -3,8 +3,8 @@ import successHelpers.credentials as credentials
 import pandas as pd
 
 from albert.resources.inventory import InventoryItem, InventoryCategory, InventoryUnitCategory
-from albert.resources.companies import Company
-from albert.resources.lots import Lot
+#from albert.resources.companies import Company
+#from albert.resources.lots import Lot
 
 #%% Client Setup
 # define tenant
@@ -14,11 +14,10 @@ tenant = "Albert Sandbox"
 #url, token = credentials.get_base_url_and_bearer_token_for(tenant)
 #client = Albert(base_url=url, token=token)
 
-client = Albert(
-    base_url=credentials.get_base_url_and_bearer_token_for("Albert Sandbox")[0],
-    token=credentials.get_base_url_and_bearer_token_for("Albert Sandbox")[1]
+client = Albert.from_token(
+    base_url=credentials.get_base_url_and_bearer_token_for(tenant)[0],
+    token=credentials.get_base_url_and_bearer_token_for(tenant)[1]
 )
-
 #%% Dry Run
 # Safety mode: True = preview only, False = actually writes
 DRY_RUN = False
