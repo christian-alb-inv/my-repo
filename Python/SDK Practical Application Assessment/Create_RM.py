@@ -1,5 +1,6 @@
 from albert import Albert
 import successHelpers.credentials as credentials
+import pandas as pd
 
 from albert.resources.inventory import InventoryItem, InventoryCategory, InventoryUnitCategory
 from albert.resources.companies import Company
@@ -20,21 +21,44 @@ client = Albert(
 
 #%% Dry Run
 # Safety mode: True = preview only, False = actually writes
-DRY_RUN = True
+DRY_RUN = False
 
-#%% Create Raw Material
+#%% Read Excel
+df = pd.read_excel("/Users/christian/Documents/GitHub/my-repo/Python/SDK Practical Application Assessment/SDK Application file.xlsx", sheet_name="RMs to create")
+print(df.head())
+print(df.columns.tolist())
+
+#%% Create RM
+# for _, row in df.iterrows(): #Der _ ist eine Python-Konvention für "diese Variable brauche ich nicht". iterrows() gibt immer zwei Werte zurück — den Zeilenindex und die Zeile selbst. Da wir den Index nicht brauchen, schreiben wir _ statt z.B. index.
+#     name = row["RM Name"]
+#     manufacturer = row["Manufacturer"]
+#     alias = row["Alias"]
+#     description = row["Description"]
+#    # tags = row["Tags (semicolon-separated)"]
+#     tags = [t.strip() for t in row["Tags (semicolon-separated)"].split(";")]
+    
+#     inv = InventoryItem(
+#         name = name,
+#         company=manufacturer,
+#         category=InventoryCategory.RAW_MATERIALS,
+#         unit_category=InventoryUnitCategory.MASS,
+#         alias=alias,
+#         description=description,
+#         tags=tags        
+#         )
+#     print(inv.name)
+
+# #%% Test Run
+#     if DRY_RUN:
+#         print(f"🔍 DRY RUN – would create: {name}")
+#     else:
+#         created = client.inventory.create(inventory_item=inv, avoid_duplicates=True)
+#         print(f"✅ Created: {created.name} | ID: {created.id}")
+
 inv = InventoryItem(
-    name= "Feenstaub",
-    company=Company(name="Christian Inc."),
+    name="Liquitint Blue HP",
     category=InventoryCategory.RAW_MATERIALS,
     unit_category=InventoryUnitCategory.MASS,
-    tags=["SDK Training"]
-    )
-
-#%% Debug
-if DRY_RUN:
-    print("🔍 DRY RUN – not writing")
-    print("Would create:", inv.name)
-else:
-    inv = client.inventory.create(inventory_item=inv, avoid_duplicates=True)
-    print("✅ Done:", inv.id)
+)
+created = client.inventory.create(inventory_item=inv, avoid_duplicates=False)
+print(f"✅ Created: {created.name} | ID: {created.id}")
